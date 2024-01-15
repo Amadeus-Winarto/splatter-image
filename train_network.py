@@ -114,6 +114,37 @@ def main(cfg: DictConfig):
     elif cfg.opt.loss == "l1":
         loss_fn = l1_loss
 
+    if cfg.opt.adversarial:
+        from discriminator import Discriminator, PretrainedDiscriminator, r1_penalty
+
+        # Build discriminator
+        if not cfg.opt.adversarial.pretrained:
+            discriminator = Discriminator(
+                in_channel=3, enable_specnorm=cfg.opt.adversarial.spectral
+            ).to(device=device)
+        else:
+            discriminator = PretrainedDiscriminator(
+                in_channel=3, enable_specnorm=cfg.opt.adversarial.spectral
+            ).to(device=device)
+
+        # Build loss function
+        if (
+            cfg.opt.adversarial.loss == "ns"
+            or cfg.opt.adversarial.loss == "relativistic"
+        ):
+            adv_loss = torch.nn.BCEWithLogitsLoss()
+        else:
+            raise NotImplementedError(
+                f"Adversarial loss {cfg.opt.adversarial.loss} is not supported"
+            )
+
+        # Build optimizer
+        disc_optim = torch.optim.AdamW(
+            discriminator.parameters(),
+            lr=cfg.opt.adversarial.optimiser.lr,
+            betas=cfg.opt.adversarial.optimiser.betas,
+        )
+
     if cfg.opt.lambda_lpips != 0:
         lpips_fn = lpips_lib.LPIPS(net='vgg').to(device)
     if cfg.opt.start_lpips_after == 0:
@@ -234,11 +265,67 @@ def main(cfg: DictConfig):
         if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
             total_loss = total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss
 
+        if cfg.opt.adversarial:
+            # Update generator
+            discriminator.disable_grad()
+            discriminator.zero_grad()
+
+            _, fake_logits = discriminator(rendered_images)
+
+            if cfg.opt.adversarial.loss == "ns":
+                loss_g = adv_loss(fake_logits, torch.ones_like(fake_logits))
+            elif cfg.opt.adversarial.loss == "relativistic":
+                _, real_logits = discriminator(gt_images)
+                loss_g_fake = loss_fn(
+                    fake_logits - torch.mean(real_logits),
+                    torch.ones_like(fake_logits),
+                )
+                loss_g_real = loss_fn(
+                    real_logits - torch.mean(fake_logits),
+                    torch.zeros_like(real_logits),
+                )
+                loss_g = (loss_g_fake + loss_g_real) / 2
+            else:
+                raise NotImplementedError(
+                    f"Adversarial loss {cfg.opt.adversarial.loss} is not supported"
+                )
+            total_loss += loss_g * cfg.opt.adversarial.lambda_g
+
         total_loss.backward()
 
         # Optimizer step
         optimizer.step()
         optimizer.zero_grad()
+
+        # Update discriminator
+        if cfg.opt.adversarial:
+            discriminator.enable_grad()
+            discriminator.zero_grad()
+
+            _, fake_logits = discriminator(rendered_images.detach())
+            _, real_logits = discriminator(gt_images)
+
+            if cfg.opt.adversarial.loss == "ns":
+                loss_d_fake = adv_loss(fake_logits, torch.zeros_like(fake_logits))
+                loss_d_real = adv_loss(real_logits, torch.ones_like(real_logits))
+                loss_d = (loss_d_real + loss_d_fake) / 2
+            elif cfg.opt.adversarial.loss == "relativistic":
+                loss_d_fake = loss_fn(
+                    fake_logits - torch.mean(real_logits),
+                    torch.zeros_like(fake_logits),
+                )
+                loss_d_real = loss_fn(
+                    real_logits - torch.mean(fake_logits),
+                    torch.ones_like(real_logits),
+                )
+                loss_d = (loss_d_real + loss_d_fake) / 2
+
+            if cfg.opt.adversarial.r1_penalty:
+                loss_d += r1_penalty(
+                    real_logits, gt_images, gamma=cfg.opt.adversarial.r1_gamma
+                )
+            loss_d.backward()
+            disc_optim.step()
 
         if cfg.opt.step_lr_at != -1:
             scheduler.step()
