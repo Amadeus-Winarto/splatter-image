@@ -320,9 +320,13 @@ def main(cfg: DictConfig):
                 )
                 loss_d = (loss_d_real + loss_d_fake) / 2
 
-            if cfg.opt.adversarial.r1_penalty:
+            if cfg.opt.adversarial.r1_gamma > 0:
+                real_features, real_logits = discriminator(gt_images)
+                real_features_norm = torch.linalg.norm(
+                    real_features.reshape(real_features.size(0), -1), dim=1
+                ).mean()
                 loss_d += r1_penalty(
-                    real_logits, gt_images, gamma=cfg.opt.adversarial.r1_gamma
+                    real_logits, real_features, gamma=0.2 * real_features_norm * 2
                 )
             loss_d.backward()
             disc_optim.step()

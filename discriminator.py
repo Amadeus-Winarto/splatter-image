@@ -120,9 +120,9 @@ class Discriminator(nn.Module):
             ResNetBlock(256, 512, enable_specnorm=enable_specnorm),
             nn.AvgPool2d(3, 2, padding=1),  # (N, 512, 8, 8)
             ResNetBlock(512, 1024, enable_specnorm=enable_specnorm),
-            nn.AvgPool2d(3, 2, padding=1),  # (N, 1024, 4, 4)
+            nn.AdaptiveAvgPool2d((1, 1)),  # (N, 1024, 1, 1)
         )
-        self.fc = wrapper(nn.Linear(1024 * 4 * 4, 1))  # (N, 1)
+        self.fc = wrapper(nn.Linear(1024, 1))  # (N, 1)
 
     def forward(self, x):
         B = x.size(0)
