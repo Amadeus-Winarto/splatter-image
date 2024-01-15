@@ -229,6 +229,8 @@ def main(cfg: DictConfig):
         # Render
         l12_loss_sum = 0.0
         lpips_loss_sum = 0.0
+        l_adv_g_sum = torch.tensor([0.0]).to(device)
+        l_adv_d_sum = torch.tensor([0.0]).to(device)
         rendered_images = []
         gt_images = []
         for b_idx in range(data["gt_images"].shape[0]):
@@ -265,7 +267,7 @@ def main(cfg: DictConfig):
         if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
             total_loss = total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss
 
-        if cfg.opt.adversarial:
+        if cfg.opt.adversarial and iteration > cfg.opt.start_adversarial_after:
             # Update generator
             discriminator.disable_grad()
             discriminator.zero_grad()
@@ -273,7 +275,7 @@ def main(cfg: DictConfig):
             _, fake_logits = discriminator(rendered_images)
 
             if cfg.opt.adversarial.loss == "ns":
-                loss_g = adv_loss(fake_logits, torch.ones_like(fake_logits))
+                l_adv_g_sum = adv_loss(fake_logits, torch.ones_like(fake_logits))
             elif cfg.opt.adversarial.loss == "relativistic":
                 _, real_logits = discriminator(gt_images)
                 loss_g_fake = loss_fn(
@@ -284,12 +286,12 @@ def main(cfg: DictConfig):
                     real_logits - torch.mean(fake_logits),
                     torch.zeros_like(real_logits),
                 )
-                loss_g = (loss_g_fake + loss_g_real) / 2
+                l_adv_g_sum = (loss_g_fake + loss_g_real) / 2
             else:
                 raise NotImplementedError(
                     f"Adversarial loss {cfg.opt.adversarial.loss} is not supported"
                 )
-            total_loss += loss_g * cfg.opt.adversarial.lambda_g
+            total_loss += cfg.opt.adversarial.lambda_g * l_adv_g_sum
 
         total_loss.backward()
 
@@ -298,7 +300,7 @@ def main(cfg: DictConfig):
         optimizer.zero_grad()
 
         # Update discriminator
-        if cfg.opt.adversarial:
+        if cfg.opt.adversarial and iteration > cfg.opt.start_adversarial_after - 1:
             discriminator.enable_grad()
             discriminator.zero_grad()
 
@@ -308,7 +310,7 @@ def main(cfg: DictConfig):
             if cfg.opt.adversarial.loss == "ns":
                 loss_d_fake = adv_loss(fake_logits, torch.zeros_like(fake_logits))
                 loss_d_real = adv_loss(real_logits, torch.ones_like(real_logits))
-                loss_d = (loss_d_real + loss_d_fake) / 2
+                l_adv_d_sum = (loss_d_real + loss_d_fake) / 2
             elif cfg.opt.adversarial.loss == "relativistic":
                 loss_d_fake = loss_fn(
                     fake_logits - torch.mean(real_logits),
@@ -318,17 +320,17 @@ def main(cfg: DictConfig):
                     real_logits - torch.mean(fake_logits),
                     torch.ones_like(real_logits),
                 )
-                loss_d = (loss_d_real + loss_d_fake) / 2
+                l_adv_d_sum = (loss_d_real + loss_d_fake) / 2
 
             if cfg.opt.adversarial.r1_gamma > 0:
                 real_features, real_logits = discriminator(gt_images)
                 real_features_norm = torch.linalg.norm(
                     real_features.reshape(real_features.size(0), -1), dim=1
                 ).mean()
-                loss_d += r1_penalty(
+                l_adv_d_sum += r1_penalty(
                     real_logits, real_features, gamma=0.2 * real_features_norm * 2
                 )
-            loss_d.backward()
+            l_adv_d_sum.backward()
             disc_optim.step()
 
         if cfg.opt.step_lr_at != -1:
@@ -343,6 +345,14 @@ def main(cfg: DictConfig):
         with torch.no_grad():
             if iteration % cfg.logging.loss_log == 0:
                 wandb.log({"training_loss": np.log10(total_loss.item() + 1e-8)}, step=iteration)
+                wandb.log(
+                    {"training_loss_g": np.log10(l_adv_g_sum.item() + 1e-8)},
+                    step=iteration,
+                )
+                wandb.log(
+                    {"training_loss_d": np.log10(l_adv_d_sum.item() + 1e-8)},
+                    step=iteration,
+                )
                 if cfg.opt.lambda_lpips != 0:
                     wandb.log({"training_l12_loss": np.log10(l12_loss_sum.item() + 1e-8)}, step=iteration)
                     if iteration > cfg.opt.start_lpips_after:
