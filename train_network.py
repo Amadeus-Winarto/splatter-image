@@ -267,7 +267,7 @@ def main(cfg: DictConfig):
         if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
             total_loss = total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss
 
-        if cfg.opt.adversarial and iteration > cfg.opt.start_adversarial_after:
+        if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_generator_after:
             # Update generator
             discriminator.disable_grad()
             discriminator.zero_grad()
@@ -300,7 +300,7 @@ def main(cfg: DictConfig):
         optimizer.zero_grad()
 
         # Update discriminator
-        if cfg.opt.adversarial and iteration > cfg.opt.start_adversarial_after - 1:
+        if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_discriminator_after:
             discriminator.enable_grad()
             discriminator.zero_grad()
 
@@ -323,12 +323,10 @@ def main(cfg: DictConfig):
                 l_adv_d_sum = (loss_d_real + loss_d_fake) / 2
 
             if cfg.opt.adversarial.r1_gamma > 0:
-                real_features, real_logits = discriminator(gt_images)
-                real_features_norm = torch.linalg.norm(
-                    real_features.reshape(real_features.size(0), -1), dim=1
-                ).mean()
+                gt_images.requires_grad_(True)
+                _, real_logits = discriminator(gt_images)
                 l_adv_d_sum += r1_penalty(
-                    real_logits, real_features, gamma=0.2 * real_features_norm * 2
+                    real_logits, [gt_images], gamma=cfg.opt.adversarial.r1_gamma
                 )
             l_adv_d_sum.backward()
             disc_optim.step()

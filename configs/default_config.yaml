@@ -23,12 +23,13 @@ opt:
   loss: l2
   adversarial: 
     enable: false
-    spectral: false
+    spectral: true
     pretrained: false
     loss: relativistic # ns, relativistic
-    lambda_g: 1.0
-    r1_gamma: 0 # Use 0 to disable
-    start_adversarial_after: 1 # Number of iterations to skip adversarial loss
+    lambda_g: 0.1
+    r1_gamma: 0.2 # Use 0 to disable
+    start_generator_after: 1100 # Number of iterations to skip adversarial loss
+    start_discriminator_after: 1000
     optimiser: 
       lr: 1e-4
       betas: [0.9, 0.99]
