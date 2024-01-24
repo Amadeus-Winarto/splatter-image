@@ -114,7 +114,7 @@ def main(cfg: DictConfig):
     elif cfg.opt.loss == "l1":
         loss_fn = l1_loss
 
-    if cfg.opt.adversarial:
+    if cfg.opt.adversarial.enable:
         from discriminator import Discriminator, PretrainedDiscriminator, r1_penalty
 
         # Build discriminator
@@ -292,7 +292,7 @@ def main(cfg: DictConfig):
         forward_loss_splat_time = forward_loss_splat_start.elapsed_time(forward_loss_splat_end)
 
         # Update discriminator
-        if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_discriminator_after:
+        if cfg.opt.adversarial.enable and iteration > cfg.opt.adversarial.start_discriminator_after:
             discriminator.enable_grad()
             discriminator.zero_grad()
 
@@ -362,7 +362,7 @@ def main(cfg: DictConfig):
 
             disc_optim.step()
 
-        if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_generator_after:
+        if cfg.opt.adversarial.enable and iteration > cfg.opt.adversarial.start_generator_after:
             # Update generator
             discriminator.disable_grad()
             discriminator.zero_grad()
@@ -447,11 +447,11 @@ def main(cfg: DictConfig):
                 wandb.log({"forward_render_time": forward_render_time}, step=iteration)
                 wandb.log({"forward_loss_splat_time": forward_loss_splat_time}, step=iteration)
 
-                if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_discriminator_after:
+                if cfg.opt.adversarial.enable and iteration > cfg.opt.adversarial.start_discriminator_after:
                     wandb.log({"forward_disc_time": forward_disc_time}, step=iteration)
                     wandb.log({"forward_loss_d_time": forward_loss_d_time}, step=iteration)
                     wandb.log({"backward_disc_time": backward_disc_time}, step=iteration)
-                if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_generator_after:
+                if cfg.opt.adversarial.enable and iteration > cfg.opt.adversarial.start_generator_after:
                     wandb.log({"forward_disc_g_time": forward_disc_g_time}, step=iteration)
                     wandb.log({"forward_loss_g_time": forward_loss_g_time}, step=iteration)
 
