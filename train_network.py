@@ -40,7 +40,7 @@ def main(cfg: DictConfig):
     )
 
     if os.path.isdir(os.path.join(vis_dir, "wandb")):
-        run_name_path = glob.glob(os.path.join(vis_dir, "wandb", "latest-run", "run-*"))[0]
+        run_name_path = glob.glob(os.path.join(vis_dir, "wandb", "run-*"))[0]
         print("Got run name path {}".format(run_name_path))
         run_id = os.path.basename(run_name_path).split("run-")[1].split(".wandb")[0]
         print("Resuming run with id {}".format(run_id))
@@ -203,11 +203,16 @@ def main(cfg: DictConfig):
             focals_pixels_pred = None
             input_images = data["gt_images"][:, :cfg.data.input_images, ...]
 
+        start_splat = torch.cuda.Event(enable_timing=True)
+        end_splat = torch.cuda.Event(enable_timing=True)
+        start_splat.record()
         gaussian_splats = gaussian_predictor(input_images,
                                              data["view_to_world_transforms"][:, :cfg.data.input_images, ...],
                                              rot_transform_quats,
                                              focals_pixels_pred)
-
+        end_splat.record()
+        torch.cuda.synchronize()
+        forward_splat_time = start_splat.elapsed_time(end_splat)
 
         if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
             # regularize very big gaussians
@@ -231,8 +236,13 @@ def main(cfg: DictConfig):
         lpips_loss_sum = 0.0
         l_adv_g_sum = torch.tensor([0.0]).to(device)
         l_adv_d_sum = torch.tensor([0.0]).to(device)
+        l_adv_r1_sum = torch.tensor([0.0]).to(device)
         rendered_images = []
         gt_images = []
+
+        start_render = torch.cuda.Event(enable_timing=True)
+        end_render = torch.cuda.Event(enable_timing=True)
+        start_render.record()
         for b_idx in range(data["gt_images"].shape[0]):
             # image at index 0 is training, remaining images are targets
             # Rendering is done sequentially because gaussian rasterization code
@@ -254,9 +264,19 @@ def main(cfg: DictConfig):
                 rendered_images.append(image)
                 gt_image = data["gt_images"][b_idx, r_idx]
                 gt_images.append(gt_image)
+        end_render.record()
+        torch.cuda.synchronize()
+        forward_render_time = start_render.elapsed_time(end_render)
+
         rendered_images = torch.stack(rendered_images, dim=0)
         gt_images = torch.stack(gt_images, dim=0)
+
+
         # Loss computation
+        forward_loss_splat_start = torch.cuda.Event(enable_timing=True)
+        forward_loss_splat_end = torch.cuda.Event(enable_timing=True)
+
+        forward_loss_splat_start.record()
         l12_loss_sum = loss_fn(rendered_images, gt_images) 
         if cfg.opt.lambda_lpips != 0 and iteration > cfg.opt.start_lpips_after:
             lpips_loss_sum = torch.mean(
@@ -266,70 +286,138 @@ def main(cfg: DictConfig):
         total_loss = l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
         if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
             total_loss = total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss
-
-        if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_generator_after:
-            # Update generator
-            discriminator.disable_grad()
-            discriminator.zero_grad()
-
-            _, fake_logits = discriminator(rendered_images)
-
-            if cfg.opt.adversarial.loss == "ns":
-                l_adv_g_sum = adv_loss(fake_logits, torch.ones_like(fake_logits))
-            elif cfg.opt.adversarial.loss == "relativistic":
-                _, real_logits = discriminator(gt_images)
-                loss_g_fake = loss_fn(
-                    fake_logits - torch.mean(real_logits),
-                    torch.ones_like(fake_logits),
-                )
-                loss_g_real = loss_fn(
-                    real_logits - torch.mean(fake_logits),
-                    torch.zeros_like(real_logits),
-                )
-                l_adv_g_sum = (loss_g_fake + loss_g_real) / 2
-            else:
-                raise NotImplementedError(
-                    f"Adversarial loss {cfg.opt.adversarial.loss} is not supported"
-                )
-            total_loss += cfg.opt.adversarial.lambda_g * l_adv_g_sum
-
-        total_loss.backward()
-
-        # Optimizer step
-        optimizer.step()
-        optimizer.zero_grad()
+        
+        forward_loss_splat_end.record()
+        torch.cuda.synchronize()
+        forward_loss_splat_time = forward_loss_splat_start.elapsed_time(forward_loss_splat_end)
 
         # Update discriminator
         if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_discriminator_after:
             discriminator.enable_grad()
             discriminator.zero_grad()
 
+            forward_disc_start = torch.cuda.Event(enable_timing=True)
+            forward_disc_end = torch.cuda.Event(enable_timing=True)
+
+            forward_disc_start.record()
+            gt_images.requires_grad_(True)
             _, fake_logits = discriminator(rendered_images.detach())
-            _, real_logits = discriminator(gt_images)
+            real_features, real_logits = discriminator(gt_images)
+            forward_disc_end.record()
+            torch.cuda.synchronize()
+            forward_disc_time = forward_disc_start.elapsed_time(forward_disc_end)
 
+            forward_loss_d_start = torch.cuda.Event(enable_timing=True)
+            forward_loss_d_end = torch.cuda.Event(enable_timing=True)
+
+            forward_loss_d_start.record()
             if cfg.opt.adversarial.loss == "ns":
-                loss_d_fake = adv_loss(fake_logits, torch.zeros_like(fake_logits))
-                loss_d_real = adv_loss(real_logits, torch.ones_like(real_logits))
-                l_adv_d_sum = (loss_d_real + loss_d_fake) / 2
+                loss_d_real = 0
+                loss_d_fake = 0
+                for fake, real in zip(fake_logits, real_logits):
+                    loss_d_fake += adv_loss(fake, torch.zeros_like(fake))
+                    loss_d_real += adv_loss(real, torch.ones_like(real))
+                l_adv_d_sum = (loss_d_real + loss_d_fake) / (len(real_logits) + len(fake_logits))
             elif cfg.opt.adversarial.loss == "relativistic":
-                loss_d_fake = loss_fn(
-                    fake_logits - torch.mean(real_logits),
-                    torch.zeros_like(fake_logits),
+                loss_d_real = 0
+                loss_d_fake = 0
+                for fake, real in zip(fake_logits, real_logits):
+                    loss_d_fake += adv_loss(fake - torch.mean(real), torch.zeros_like(fake))
+                    loss_d_real += adv_loss(real - torch.mean(fake), torch.ones_like(real))
+                l_adv_d_sum = (loss_d_real + loss_d_fake) / (len(real_logits) + len(fake_logits))
+            else: 
+                raise NotImplementedError(
+                    f"Adversarial loss {cfg.opt.adversarial.loss} is not supported"
                 )
-                loss_d_real = loss_fn(
-                    real_logits - torch.mean(fake_logits),
-                    torch.ones_like(real_logits),
-                )
-                l_adv_d_sum = (loss_d_real + loss_d_fake) / 2
-
+            
             if cfg.opt.adversarial.r1_gamma > 0:
-                gt_images.requires_grad_(True)
-                _, real_logits = discriminator(gt_images)
-                l_adv_d_sum += r1_penalty(
-                    real_logits, [gt_images], gamma=cfg.opt.adversarial.r1_gamma
-                )
+                is_feature_r1 = cfg.opt.adversarial.pretrained
+                
+                r1_input = [gt_images] if not is_feature_r1 else real_features
+                l_adv_r1_sum = 0
+                for feature, logits in zip(r1_input, real_logits):
+                    if is_feature_r1:
+                        with torch.no_grad():
+                            multiplier = cfg.opt.adversarial.r1_gamma * torch.norm(feature)
+                    else: 
+                        multiplier = cfg.opt.adversarial.r1_gamma
+                    
+                    l_adv_r1_sum += r1_penalty(
+                        logits, [feature], gamma=multiplier
+                    )
+                l_adv_r1_sum /= len(real_logits)
+                l_adv_d_sum += l_adv_r1_sum
+            forward_loss_d_end.record()
+            torch.cuda.synchronize()
+            forward_loss_d_time = forward_loss_d_start.elapsed_time(forward_loss_d_end)
+
+            backward_disc_start = torch.cuda.Event(enable_timing=True)
+            backward_disc_end = torch.cuda.Event(enable_timing=True)
+
+            backward_disc_start.record()
             l_adv_d_sum.backward()
+            backward_disc_end.record()
+            torch.cuda.synchronize()
+            backward_disc_time = backward_disc_start.elapsed_time(backward_disc_end)
+
             disc_optim.step()
+
+        if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_generator_after:
+            # Update generator
+            discriminator.disable_grad()
+            discriminator.zero_grad()
+
+            forward_disc_g_start = torch.cuda.Event(enable_timing=True)
+            forward_disc_g_end = torch.cuda.Event(enable_timing=True)
+
+            forward_disc_g_start.record()
+            _, fake_logits = discriminator(rendered_images)
+            forward_disc_g_end.record()
+            torch.cuda.synchronize()
+            forward_disc_g_time = forward_disc_g_start.elapsed_time(forward_disc_g_end)
+
+            forward_loss_g_start = torch.cuda.Event(enable_timing=True)
+            forward_loss_g_end = torch.cuda.Event(enable_timing=True)
+
+            forward_loss_g_start.record()
+            
+            if cfg.opt.adversarial.loss == "ns":
+                l_adv_g_sum = 0
+                for fake in fake_logits:
+                    l_adv_g_sum += adv_loss(fake, torch.ones_like(fake))
+                l_adv_g_sum = (l_adv_g_sum) / len(fake_logits)
+            elif cfg.opt.adversarial.loss == "relativistic":
+                _, real_logits = discriminator(gt_images)
+                loss_g_fake = 0
+                loss_g_real = 0
+                for fake, real in zip(fake_logits, real_logits):
+                    loss_g_fake += adv_loss(fake - torch.mean(real), torch.ones_like(fake))
+                    loss_g_real += adv_loss(real - torch.mean(fake), torch.zeros_like(real))
+                l_adv_g_sum = (loss_g_real + loss_g_fake) / (len(real_logits) + len(fake_logits))
+            else:
+                raise NotImplementedError(
+                    f"Adversarial loss {cfg.opt.adversarial.loss} is not supported"
+                )
+            total_loss += cfg.opt.adversarial.lambda_g * l_adv_g_sum
+            forward_loss_g_end.record()
+            torch.cuda.synchronize()
+
+            forward_loss_g_time = forward_loss_g_start.elapsed_time(forward_loss_g_end)
+
+        backward_g_start = torch.cuda.Event(enable_timing=True)
+        backward_g_end = torch.cuda.Event(enable_timing=True)
+
+        backward_g_start.record()
+        total_loss.backward()
+        backward_g_end.record()
+        torch.cuda.synchronize()
+
+        backward_g_time = backward_g_start.elapsed_time(backward_g_end)
+
+        # Optimizer step
+        optimizer.step()
+        optimizer.zero_grad()
+
 
         if cfg.opt.step_lr_at != -1:
             scheduler.step()
@@ -351,6 +439,24 @@ def main(cfg: DictConfig):
                     {"training_loss_d": np.log10(l_adv_d_sum.item() + 1e-8)},
                     step=iteration,
                 )
+                wandb.log(
+                    {"training_loss_r1": np.log10(l_adv_r1_sum.item() + 1e-8)},
+                    step=iteration,
+                )
+                wandb.log({"forward_splat_time": forward_splat_time}, step=iteration)
+                wandb.log({"forward_render_time": forward_render_time}, step=iteration)
+                wandb.log({"forward_loss_splat_time": forward_loss_splat_time}, step=iteration)
+
+                if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_discriminator_after:
+                    wandb.log({"forward_disc_time": forward_disc_time}, step=iteration)
+                    wandb.log({"forward_loss_d_time": forward_loss_d_time}, step=iteration)
+                    wandb.log({"backward_disc_time": backward_disc_time}, step=iteration)
+                if cfg.opt.adversarial and iteration > cfg.opt.adversarial.start_generator_after:
+                    wandb.log({"forward_disc_g_time": forward_disc_g_time}, step=iteration)
+                    wandb.log({"forward_loss_g_time": forward_loss_g_time}, step=iteration)
+
+                wandb.log({"backward_g_time": backward_g_time}, step=iteration)
+
                 if cfg.opt.lambda_lpips != 0:
                     wandb.log({"training_l12_loss": np.log10(l12_loss_sum.item() + 1e-8)}, step=iteration)
                     if iteration > cfg.opt.start_lpips_after:
