@@ -570,7 +570,7 @@ class GaussianSplatPredictor(nn.Module):
         # so we can preprocess it
         # for co3d this is done on the fly
         if self.cfg.data.category == "cars" or self.cfg.data.category == "chairs" \
-            or self.cfg.data.category == "objaverse":
+            or self.cfg.data.category == "objaverse" or self.cfg.data.category == "mixamo":
             ray_dirs[:, :2, ...] /= fov2focal(self.cfg.data.fov * np.pi / 180, 
                                               self.cfg.data.training_resolution)
         self.register_buffer('ray_dirs', ray_dirs)
@@ -696,7 +696,7 @@ class GaussianSplatPredictor(nn.Module):
         # expands ray dirs along the batch dimension
         # adjust ray directions according to fov if not done already
         if self.cfg.data.category == "cars" or self.cfg.data.category == "chairs" \
-            or self.cfg.data.category == "objaverse":
+            or self.cfg.data.category == "objaverse" or self.cfg.data.category == "mixamo":
             ray_dirs_xy = self.ray_dirs.expand(depth_network.shape[0], 3, *self.ray_dirs.shape[2:])
         else:
             assert torch.all(focals_pixels > 0)
@@ -733,7 +733,8 @@ class GaussianSplatPredictor(nn.Module):
         else:
             film_camera_emb = None
 
-        if self.cfg.data.category == "cars" or self.cfg.data.category == "chairs":
+        acceptable_none = set(["cars", "chairs", "mixamo"])
+        if self.cfg.data.category in acceptable_none:
             assert focals_pixels is None, "Unexpected argument for srn dataset"
         else:
             assert focals_pixels is not None

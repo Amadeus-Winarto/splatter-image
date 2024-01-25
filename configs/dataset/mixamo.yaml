@@ -1,0 +1,13 @@
+# @package _global_
+data:
+  znear: 1
+  zfar: 6
+  category: mixamo
+  white_background: true
+  origin_distances: false
+
+model:
+  opacity_scale: 0.001
+  scale_scale: 0.001
+  scale_bias: 0.02
+  xyz_scale: 0.000001

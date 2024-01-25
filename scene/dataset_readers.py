@@ -21,7 +21,7 @@ class CameraInfo(NamedTuple):
     height: int
 
 
-def readCamerasFromTxt(rgb_paths, pose_paths, idxs):
+def readCamerasFromTxt(rgb_paths, pose_paths, idxs, flip=False):
     cam_infos = []
     # Transform fov from degrees to radians
     fovx = 51.98948897809546 * 2 * np.pi / 360
@@ -32,6 +32,10 @@ def readCamerasFromTxt(rgb_paths, pose_paths, idxs):
         # no need to change from SRN camera axes (x right, y down, z away) 
         # it's the same as COLMAP (x right, y down, z forward)
         c2w = np.loadtxt(cam_name, dtype=np.float32).reshape(4, 4)
+        if flip: 
+            # Cameras are in (x right, y up, z back) axes 
+            # Need to transform to (x right, y down, z forward) axes
+            c2w = c2w @ np.diag([1, -1, -1, 1])
 
         # get the world-to-camera transform and set R, T
         w2c = np.linalg.inv(c2w)
